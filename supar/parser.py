@@ -130,6 +130,12 @@ class Parser(object):
 
         args = self.args.update(locals())
         init_logger(logger, verbose=args.verbose)
+        logger.info('\n' + str(args))
+        if args.encoder == 'bert':
+            num_parameters = self.model.encoder.model.num_parameters()
+            if args.concate:
+                num_parameters += self.model.encoder.encoder.num_parameters()
+            logger.info("Number of parameters:" + str(num_parameters))
 
         self.transform.train()
         batch_size = batch_size // update_steps

@@ -37,6 +37,7 @@ def init(parser):
 
 def parse(local_rank, args):
     Parser = args.pop('Parser')
+    # <class 'supar.models.sdp.biaffine.parser.BiaffineSemanticDependencyParser'>
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
     if get_device_count() > 1:
@@ -47,7 +48,9 @@ def parse(local_rank, args):
     torch.cuda.set_device(local_rank)
     # init logger after dist has been initialized
     init_logger(logger, f"{args.path}.{args.mode}.log", 'a' if args.get('checkpoint') else 'w')
-    logger.info('\n' + str(args))
+    logger.info(get_device_count())
+    logger.info(torch.cuda.is_available())
+    # logger.info('\n' + str(args))
 
     args.local_rank = local_rank
     os.environ['RANK'] = os.environ['LOCAL_RANK'] = f'{local_rank}'

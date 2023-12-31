@@ -28,11 +28,7 @@ By default, BiLSTM-based semantic dependency parsing models take POS tag, lemma,
 Below are examples of training `biaffine` and `vi` semantic dependency parsing models:
 ```sh
 # biaffine
-$ python -u -m supar.cmds.sdp.biaffine train -b -c sdp-biaffine-en -d 0 -f tag char lemma -p model  \
-    --train dm/train.conllu  \
-    --dev dm/dev.conllu  \
-    --test dm/test.conllu  \
-    --embed glove-6b-100
+$ python -u -m supar.cmds.sdp.biaffine train -b -c config.yaml -d 0 -p model --encoder transformer
 # vi
 $ python -u -m supar.cmds.sdp.vi train -b -c sdp-vi-en -d 1 -f tag char lemma -p model  \
     --train dm/train.conllu  \
@@ -44,20 +40,10 @@ $ python -u -m supar.cmds.sdp.vi train -b -c sdp-vi-en -d 1 -f tag char lemma -p
 
 To finetune [`robert-large`](https://huggingface.co/roberta-large):
 ```sh
-$ python -u -m supar.cmds.sdp.biaffine train -b -d 0 -c sdp-biaffine-roberta-en -p model  \
-    --train dm/train.conllu  \
-    --dev dm/dev.conllu  \
-    --test dm/test.conllu  \
-    --encoder=bert  \
-    --bert=roberta-large  \
-    --lr=5e-5  \
-    --lr-rate=1  \
-    --batch-size=500  \
-    --epochs=10  \
-    --update-steps=1
+$ spython -u -m supar.cmds.sdp.biaffine train -b -c dm.biaffine.sdp.roberta.ini -d 0 -p model --encoder bert --bert roberta-base --train data/sdp/PSD/train.en.psd.conllu --dev data/sdp/PSD/dev.en.psd.conllu --test data/sdp/PSD/test.en.id.psd.conllu
 ```
 
 To evaluate:
 ```sh
-python -u -m supar.cmds.sdp.biaffine evaluate -d 0 -p sdp-biaffine-en --data dm/test.conllu
+$ spython -u -m supar.cmds.sdp.biaffine evaluate -c dm.biaffine.sdp.roberta.ini -d 0 -p model --data data/sdp/PSD/test.en.id.psd.conllu
 ```

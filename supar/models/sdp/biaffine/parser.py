@@ -97,6 +97,10 @@ class BiaffineSemanticDependencyParser(Parser):
         mask = mask.unsqueeze(1) & mask.unsqueeze(2)
         mask[:, 0] = 0
         s_edge, s_label = self.model(words, feats)
+        # logger.info("s_edge")
+        # logger.info(s_edge.shape)
+        # logger.info("s_label")
+        # logger.info(s_label.shape)
         loss = self.model.loss(s_edge, s_label, labels, mask)
         label_preds = self.model.decode(s_edge, s_label)
         return ChartMetric(loss, label_preds.masked_fill(~mask, -1), labels.masked_fill(~mask, -1))
@@ -152,26 +156,27 @@ class BiaffineSemanticDependencyParser(Parser):
             WORD.vocab = t.vocab
         else:
             WORD = Field('words', pad=PAD, unk=UNK, bos=BOS, lower=True)
-            if 'tag' in args.feat:
-                TAG = Field('tags', bos=BOS)
-            if 'char' in args.feat:
-                CHAR = SubwordField('chars', pad=PAD, unk=UNK, bos=BOS, fix_len=args.fix_len)
-            if 'lemma' in args.feat:
-                LEMMA = Field('lemmas', pad=PAD, unk=UNK, bos=BOS, lower=True)
-            if 'elmo' in args.feat:
-                from allennlp.modules.elmo import batch_to_ids
-                ELMO = RawField('elmo')
-                ELMO.compose = lambda x: batch_to_ids(x).to(WORD.device)
-            if 'bert' in args.feat:
-                t = TransformerTokenizer(args.bert)
-                BERT = SubwordField('bert', pad=t.pad, unk=t.unk, bos=t.bos, fix_len=args.fix_len, tokenize=t)
-                BERT.vocab = t.vocab
+            if args.feat:
+                if 'tag' in args.feat:
+                    TAG = Field('tags', bos=BOS)
+                if 'char' in args.feat:
+                    CHAR = SubwordField('chars', pad=PAD, unk=UNK, bos=BOS, fix_len=args.fix_len)
+                if 'lemma' in args.feat:
+                    LEMMA = Field('lemmas', pad=PAD, unk=UNK, bos=BOS, lower=True)
+                if 'elmo' in args.feat:
+                    from allennlp.modules.elmo import batch_to_ids
+                    ELMO = RawField('elmo')
+                    ELMO.compose = lambda x: batch_to_ids(x).to(WORD.device)
+                if 'bert' in args.feat:
+                    t = TransformerTokenizer(args.bert)
+                    BERT = SubwordField('bert', pad=t.pad, unk=t.unk, bos=t.bos, fix_len=args.fix_len, tokenize=t)
+                    BERT.vocab = t.vocab
         LABEL = ChartField('labels', fn=CoNLL.get_labels)
         transform = CoNLL(FORM=(WORD, CHAR, ELMO, BERT), LEMMA=LEMMA, POS=TAG, PHEAD=LABEL)
 
         train = Dataset(transform, args.train, **args)
         if args.encoder != 'bert':
-            WORD.build(train, args.min_freq, (Embedding.load(args.embed) if args.embed else None), lambda x: x / torch.std(x))
+            WORD.build(train, args.min_freq, (Embedding.load(args.embed) if args.encoder == 'lstm' else None), lambda x: x / torch.std(x))
             if TAG is not None:
                 TAG.build(train)
             if CHAR is not None:
@@ -191,6 +196,7 @@ class BiaffineSemanticDependencyParser(Parser):
             'unk_index': WORD.unk_index,
             'bos_index': WORD.bos_index
         })
+        # logger.info('\n' + str(args))
         logger.info(f"{transform}")
 
         logger.info("Building the model")

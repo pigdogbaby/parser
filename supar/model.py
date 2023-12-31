@@ -98,12 +98,19 @@ class Model(nn.Module):
             self.embed_dropout = nn.Dropout(p=self.args.embed_dropout)
             self.encoder = TransformerEncoder(layer=TransformerEncoderLayer(n_heads=self.args.n_encoder_heads,
                                                                             n_model=self.args.n_encoder_hidden,
+                                                                            n_embed=self.args.rank,
                                                                             n_inner=self.args.n_encoder_inner,
                                                                             attn_dropout=self.args.encoder_attn_dropout,
                                                                             ffn_dropout=self.args.encoder_ffn_dropout,
-                                                                            dropout=self.args.encoder_dropout),
+                                                                            dropout=self.args.encoder_dropout,
+                                                                            relation=self.args.relation,
+                                                                            cpd=self.args.cpd,
+                                                                            softmax_head=self.args.softmax_head),
                                               n_layers=self.args.n_encoder_layers,
-                                              n_model=self.args.n_encoder_hidden)
+                                              n_model=self.args.n_encoder_hidden,
+                                              n_heads=self.args.n_encoder_heads,
+                                              relation=self.args.relation,
+                                              scale=self.args.scale)
             self.encoder_dropout = nn.Dropout(p=self.args.encoder_dropout)
         elif encoder == 'bert':
             self.encoder = TransformerEmbedding(name=self.args.bert,
@@ -111,7 +118,12 @@ class Model(nn.Module):
                                                 pooling=self.args.bert_pooling,
                                                 pad_index=self.args.pad_index,
                                                 mix_dropout=self.args.mix_dropout,
-                                                finetune=True)
+                                                rank=self.args.rank,
+                                                finetune=self.args.finetune,
+                                                relation=self.args.relation,
+                                                cpd=self.args.cpd,
+                                                softmax_head=self.args.softmax_head,
+                                                concate=self.args.concate)
             self.encoder_dropout = nn.Dropout(p=self.args.encoder_dropout)
             self.args.n_encoder_hidden = self.encoder.n_out
 
@@ -146,16 +158,17 @@ class Model(nn.Module):
                 word_embed = torch.cat((word_embed, self.embed_proj(pretrained)), -1)
 
         feat_embed = []
-        if 'tag' in self.args.feat:
-            feat_embed.append(self.tag_embed(feats.pop()))
-        if 'char' in self.args.feat:
-            feat_embed.append(self.char_embed(feats.pop(0)))
-        if 'elmo' in self.args.feat:
-            feat_embed.append(self.elmo_embed(feats.pop(0)))
-        if 'bert' in self.args.feat:
-            feat_embed.append(self.bert_embed(feats.pop(0)))
-        if 'lemma' in self.args.feat:
-            feat_embed.append(self.lemma_embed(feats.pop(0)))
+        if self.args.feat:
+            if 'tag' in self.args.feat:
+                feat_embed.append(self.tag_embed(feats.pop()))
+            if 'char' in self.args.feat:
+                feat_embed.append(self.char_embed(feats.pop(0)))
+            if 'elmo' in self.args.feat:
+                feat_embed.append(self.elmo_embed(feats.pop(0)))
+            if 'bert' in self.args.feat:
+                feat_embed.append(self.bert_embed(feats.pop(0)))
+            if 'lemma' in self.args.feat:
+                feat_embed.append(self.lemma_embed(feats.pop(0)))
         if isinstance(self.embed_dropout, IndependentDropout):
             if len(feat_embed) == 0:
                 raise RuntimeError(f"`feat` is not allowed to be empty, which is {self.args.feat} now")

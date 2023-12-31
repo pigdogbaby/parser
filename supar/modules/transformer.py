@@ -8,6 +8,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import opt_einsum as oe
 
 
 class TransformerWordEmbedding(nn.Module):
@@ -32,7 +33,7 @@ class TransformerWordEmbedding(nn.Module):
         elif pos == 'sinusoid_relative':
             self.pos_embed = SinusoidRelativePositionalEmbedding()
         elif pos == 'learnable':
-            self.pos_embed = PositionalEmbedding(max_len=max_len)
+            self.pos_embed = PositionalEmbedding(n_model=n_embed, max_len=max_len)
         elif pos == 'learnable_relative':
             self.pos_embed = RelativePositionalEmbedding(max_len=max_len)
         else:
@@ -82,24 +83,47 @@ class TransformerEncoder(nn.Module):
         layer: nn.Module,
         n_layers: int = 6,
         n_model: int = 1024,
+        n_heads: int = 8,
         pre_norm: bool = False,
+        relation: bool = False,
+        scale: bool = False,
     ) -> TransformerEncoder:
         super(TransformerEncoder, self).__init__()
 
         self.n_layers = n_layers
         self.n_model = n_model
+        self.n_heads = n_heads
         self.pre_norm = pre_norm
+        self.relation = relation
+        self.scale = scale
 
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(n_layers)])
         self.norm = nn.LayerNorm(n_model) if self.pre_norm else None
 
+        if relation and scale:
+            self.scaler = nn.Parameter(torch.Tensor(n_layers))
+            nn.init.uniform_(self.scaler)
+
     def forward(self, x: torch.Tensor, mask: torch.BoolTensor) -> torch.Tensor:
-        x = x.transpose(0, 1)
+        if self.relation:
+            batch_size, seq_len = mask.shape
+            relation = torch.zeros(batch_size, self.n_heads, seq_len, seq_len).to(x.device)
+            if self.scale:
+                cnt = 0
+                scaler = torch.softmax(self.scaler, 0).to(x.device)
         for layer in self.layers:
-            x = layer(x, mask)
+            if self.relation:
+                x, tmp = layer(x, mask)
+                if self.scale:
+                    relation += scaler[cnt] * tmp
+                    cnt += 1
+                else:
+                    relation = tmp
+            else:
+                x = layer(x, mask)
         if self.pre_norm:
             x = self.norm(x)
-        return x.transpose(0, 1)
+        return relation.permute(0, 2, 3, 1) if self.relation else x
 
 
 class TransformerDecoder(nn.Module):
@@ -146,10 +170,14 @@ class TransformerEncoderLayer(nn.Module):
         self,
         n_heads: int = 8,
         n_model: int = 1024,
+        n_embed: int = 128,
         n_inner: int = 2048,
         activation: str = 'relu',
         bias: bool = True,
         pre_norm: bool = False,
+        relation: bool = False,
+        cpd: bool = False,
+        softmax_head: bool = False,
         attn_dropout: float = 0.1,
         ffn_dropout: float = 0.1,
         dropout: float = 0.1
@@ -158,9 +186,12 @@ class TransformerEncoderLayer(nn.Module):
 
         self.attn = MultiHeadAttention(n_heads=n_heads,
                                        n_model=n_model,
-                                       n_embed=n_model//n_heads,
+                                       n_embed=n_embed,
                                        dropout=attn_dropout,
-                                       bias=bias)
+                                       bias=bias,
+                                       relation=relation,
+                                       cpd=cpd,
+                                       softmax_head=softmax_head)
         self.attn_norm = nn.LayerNorm(n_model)
         self.ffn = PositionwiseFeedForward(n_model=n_model,
                                            n_inner=n_inner,
@@ -170,6 +201,7 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.pre_norm = pre_norm
+        self.relation = relation
 
     def forward(self, x: torch.Tensor, mask: torch.BoolTensor) -> torch.Tensor:
         if self.pre_norm:
@@ -178,198 +210,202 @@ class TransformerEncoderLayer(nn.Module):
             n = self.ffn_norm(x)
             x = x + self.dropout(self.ffn(n))
         else:
-            x = self.attn_norm(x + self.dropout(self.attn(x, x, x, mask)))
+            if self.relation:
+                tmp, relation = self.attn(x, x, x, mask)
+                x = self.attn_norm(x + self.dropout(tmp))
+            else:
+                x = self.attn_norm(x + self.dropout(self.attn(x, x, x, mask)))
             x = self.ffn_norm(x + self.dropout(self.ffn(x)))
-        return x
+        return (x, relation) if self.relation else x
 
 
-class RelativePositionTransformerEncoderLayer(TransformerEncoderLayer):
+# class RelativePositionTransformerEncoderLayer(TransformerEncoderLayer):
 
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_inner: int = 2048,
-        activation: str = 'relu',
-        pre_norm: bool = False,
-        attn_dropout: float = 0.1,
-        ffn_dropout: float = 0.1,
-        dropout: float = 0.1
-    ) -> RelativePositionTransformerEncoderLayer:
-        super(RelativePositionTransformerEncoderLayer, self).__init__()
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_inner: int = 2048,
+#         activation: str = 'relu',
+#         pre_norm: bool = False,
+#         attn_dropout: float = 0.1,
+#         ffn_dropout: float = 0.1,
+#         dropout: float = 0.1
+#     ) -> RelativePositionTransformerEncoderLayer:
+#         super(RelativePositionTransformerEncoderLayer, self).__init__()
 
-        self.attn = RelativePositionMultiHeadAttention(n_heads=n_heads,
-                                                       n_model=n_model,
-                                                       n_embed=n_model//n_heads,
-                                                       dropout=attn_dropout)
-        self.attn_norm = nn.LayerNorm(n_model)
-        self.ffn = PositionwiseFeedForward(n_model=n_model,
-                                           n_inner=n_inner,
-                                           activation=activation,
-                                           dropout=ffn_dropout)
-        self.ffn_norm = nn.LayerNorm(n_model)
-        self.dropout = nn.Dropout(dropout)
+#         self.attn = RelativePositionMultiHeadAttention(n_heads=n_heads,
+#                                                        n_model=n_model,
+#                                                        n_embed=n_model//n_heads,
+#                                                        dropout=attn_dropout)
+#         self.attn_norm = nn.LayerNorm(n_model)
+#         self.ffn = PositionwiseFeedForward(n_model=n_model,
+#                                            n_inner=n_inner,
+#                                            activation=activation,
+#                                            dropout=ffn_dropout)
+#         self.ffn_norm = nn.LayerNorm(n_model)
+#         self.dropout = nn.Dropout(dropout)
 
-        self.pre_norm = pre_norm
-
-
-class RotaryPositionTransformerEncoderLayer(TransformerEncoderLayer):
-
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_inner: int = 2048,
-        activation: str = 'relu',
-        pre_norm: bool = False,
-        attn_dropout: float = 0.1,
-        ffn_dropout: float = 0.1,
-        dropout: float = 0.1
-    ) -> RotaryPositionTransformerEncoderLayer:
-        super(RotaryPositionTransformerEncoderLayer, self).__init__()
-
-        self.attn = RotaryPositionMultiHeadAttention(n_heads=n_heads,
-                                                     n_model=n_model,
-                                                     n_embed=n_model//n_heads,
-                                                     dropout=attn_dropout)
-        self.attn_norm = nn.LayerNorm(n_model)
-        self.ffn = PositionwiseFeedForward(n_model=n_model,
-                                           n_inner=n_inner,
-                                           activation=activation,
-                                           dropout=ffn_dropout)
-        self.ffn_norm = nn.LayerNorm(n_model)
-        self.dropout = nn.Dropout(dropout)
-
-        self.pre_norm = pre_norm
+#         self.pre_norm = pre_norm
 
 
-class TransformerDecoderLayer(nn.Module):
+# class RotaryPositionTransformerEncoderLayer(TransformerEncoderLayer):
 
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_inner: int = 2048,
-        activation: str = 'relu',
-        bias: bool = True,
-        pre_norm: bool = False,
-        attn_dropout: float = 0.1,
-        ffn_dropout: float = 0.1,
-        dropout: float = 0.1
-    ) -> TransformerDecoderLayer:
-        super(TransformerDecoderLayer, self).__init__()
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_inner: int = 2048,
+#         activation: str = 'relu',
+#         pre_norm: bool = False,
+#         attn_dropout: float = 0.1,
+#         ffn_dropout: float = 0.1,
+#         dropout: float = 0.1
+#     ) -> RotaryPositionTransformerEncoderLayer:
+#         super(RotaryPositionTransformerEncoderLayer, self).__init__()
 
-        self.self_attn = MultiHeadAttention(n_heads=n_heads,
-                                            n_model=n_model,
-                                            n_embed=n_model//n_heads,
-                                            dropout=attn_dropout,
-                                            bias=bias)
-        self.self_attn_norm = nn.LayerNorm(n_model)
-        self.mha_attn = MultiHeadAttention(n_heads=n_heads,
-                                           n_model=n_model,
-                                           n_embed=n_model//n_heads,
-                                           dropout=attn_dropout,
-                                           bias=bias)
-        self.mha_attn_norm = nn.LayerNorm(n_model)
-        self.ffn = PositionwiseFeedForward(n_model=n_model,
-                                           n_inner=n_inner,
-                                           activation=activation,
-                                           dropout=ffn_dropout)
-        self.ffn_norm = nn.LayerNorm(n_model)
-        self.dropout = nn.Dropout(dropout)
+#         self.attn = RotaryPositionMultiHeadAttention(n_heads=n_heads,
+#                                                      n_model=n_model,
+#                                                      n_embed=n_model//n_heads,
+#                                                      dropout=attn_dropout)
+#         self.attn_norm = nn.LayerNorm(n_model)
+#         self.ffn = PositionwiseFeedForward(n_model=n_model,
+#                                            n_inner=n_inner,
+#                                            activation=activation,
+#                                            dropout=ffn_dropout)
+#         self.ffn_norm = nn.LayerNorm(n_model)
+#         self.dropout = nn.Dropout(dropout)
 
-        self.pre_norm = pre_norm
-
-    def forward(
-        self,
-        x_tgt: torch.Tensor,
-        x_src: torch.Tensor,
-        tgt_mask: torch.BoolTensor,
-        src_mask: torch.BoolTensor,
-        attn_mask: Optional[torch.BoolTensor] = None
-    ) -> torch.Tensor:
-        if self.pre_norm:
-            n_tgt = self.self_attn_norm(x_tgt)
-            x_tgt = x_tgt + self.dropout(self.self_attn(n_tgt, n_tgt, n_tgt, tgt_mask, attn_mask))
-            n_tgt = self.mha_attn_norm(x_tgt)
-            x_tgt = x_tgt + self.dropout(self.mha_attn(n_tgt, x_src, x_src, src_mask))
-            n_tgt = self.ffn_norm(x_tgt)
-            x_tgt = x_tgt + self.dropout(self.ffn(x_tgt))
-        else:
-            x_tgt = self.self_attn_norm(x_tgt + self.dropout(self.self_attn(x_tgt, x_tgt, x_tgt, tgt_mask, attn_mask)))
-            x_tgt = self.mha_attn_norm(x_tgt + self.dropout(self.mha_attn(x_tgt, x_src, x_src, src_mask)))
-            x_tgt = self.ffn_norm(x_tgt + self.dropout(self.ffn(x_tgt)))
-        return x_tgt
+#         self.pre_norm = pre_norm
 
 
-class RelativePositionTransformerDecoderLayer(TransformerDecoderLayer):
+# class TransformerDecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_inner: int = 2048,
-        activation: str = 'relu',
-        pre_norm: bool = False,
-        attn_dropout: float = 0.1,
-        ffn_dropout: float = 0.1,
-        dropout: float = 0.1
-    ) -> RelativePositionTransformerDecoderLayer:
-        super(RelativePositionTransformerDecoderLayer, self).__init__()
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_inner: int = 2048,
+#         activation: str = 'relu',
+#         bias: bool = True,
+#         pre_norm: bool = False,
+#         attn_dropout: float = 0.1,
+#         ffn_dropout: float = 0.1,
+#         dropout: float = 0.1
+#     ) -> TransformerDecoderLayer:
+#         super(TransformerDecoderLayer, self).__init__()
 
-        self.self_attn = RelativePositionMultiHeadAttention(n_heads=n_heads,
-                                                            n_model=n_model,
-                                                            n_embed=n_model//n_heads,
-                                                            dropout=attn_dropout)
-        self.self_attn_norm = nn.LayerNorm(n_model)
-        self.mha_attn = RelativePositionMultiHeadAttention(n_heads=n_heads,
-                                                           n_model=n_model,
-                                                           n_embed=n_model//n_heads,
-                                                           dropout=attn_dropout)
-        self.mha_attn_norm = nn.LayerNorm(n_model)
-        self.ffn = PositionwiseFeedForward(n_model=n_model,
-                                           n_inner=n_inner,
-                                           activation=activation,
-                                           dropout=ffn_dropout)
-        self.ffn_norm = nn.LayerNorm(n_model)
-        self.dropout = nn.Dropout(dropout)
+#         self.self_attn = MultiHeadAttention(n_heads=n_heads,
+#                                             n_model=n_model,
+#                                             n_embed=n_model//n_heads,
+#                                             dropout=attn_dropout,
+#                                             bias=bias)
+#         self.self_attn_norm = nn.LayerNorm(n_model)
+#         self.mha_attn = MultiHeadAttention(n_heads=n_heads,
+#                                            n_model=n_model,
+#                                            n_embed=n_model//n_heads,
+#                                            dropout=attn_dropout,
+#                                            bias=bias)
+#         self.mha_attn_norm = nn.LayerNorm(n_model)
+#         self.ffn = PositionwiseFeedForward(n_model=n_model,
+#                                            n_inner=n_inner,
+#                                            activation=activation,
+#                                            dropout=ffn_dropout)
+#         self.ffn_norm = nn.LayerNorm(n_model)
+#         self.dropout = nn.Dropout(dropout)
 
-        self.pre_norm = pre_norm
+#         self.pre_norm = pre_norm
+
+#     def forward(
+#         self,
+#         x_tgt: torch.Tensor,
+#         x_src: torch.Tensor,
+#         tgt_mask: torch.BoolTensor,
+#         src_mask: torch.BoolTensor,
+#         attn_mask: Optional[torch.BoolTensor] = None
+#     ) -> torch.Tensor:
+#         if self.pre_norm:
+#             n_tgt = self.self_attn_norm(x_tgt)
+#             x_tgt = x_tgt + self.dropout(self.self_attn(n_tgt, n_tgt, n_tgt, tgt_mask, attn_mask))
+#             n_tgt = self.mha_attn_norm(x_tgt)
+#             x_tgt = x_tgt + self.dropout(self.mha_attn(n_tgt, x_src, x_src, src_mask))
+#             n_tgt = self.ffn_norm(x_tgt)
+#             x_tgt = x_tgt + self.dropout(self.ffn(x_tgt))
+#         else:
+#             x_tgt = self.self_attn_norm(x_tgt + self.dropout(self.self_attn(x_tgt, x_tgt, x_tgt, tgt_mask, attn_mask)))
+#             x_tgt = self.mha_attn_norm(x_tgt + self.dropout(self.mha_attn(x_tgt, x_src, x_src, src_mask)))
+#             x_tgt = self.ffn_norm(x_tgt + self.dropout(self.ffn(x_tgt)))
+#         return x_tgt
 
 
-class RotaryPositionTransformerDecoderLayer(TransformerDecoderLayer):
+# class RelativePositionTransformerDecoderLayer(TransformerDecoderLayer):
 
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_inner: int = 2048,
-        activation: str = 'relu',
-        pre_norm: bool = False,
-        attn_dropout: float = 0.1,
-        ffn_dropout: float = 0.1,
-        dropout: float = 0.1
-    ) -> RotaryPositionTransformerDecoderLayer:
-        super(RotaryPositionTransformerDecoderLayer, self).__init__()
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_inner: int = 2048,
+#         activation: str = 'relu',
+#         pre_norm: bool = False,
+#         attn_dropout: float = 0.1,
+#         ffn_dropout: float = 0.1,
+#         dropout: float = 0.1
+#     ) -> RelativePositionTransformerDecoderLayer:
+#         super(RelativePositionTransformerDecoderLayer, self).__init__()
 
-        self.self_attn = RotaryPositionMultiHeadAttention(n_heads=n_heads,
-                                                          n_model=n_model,
-                                                          n_embed=n_model//n_heads,
-                                                          dropout=attn_dropout)
-        self.self_attn_norm = nn.LayerNorm(n_model)
-        self.mha_attn = RotaryPositionMultiHeadAttention(n_heads=n_heads,
-                                                         n_model=n_model,
-                                                         n_embed=n_model//n_heads,
-                                                         dropout=attn_dropout)
-        self.mha_attn_norm = nn.LayerNorm(n_model)
-        self.ffn = PositionwiseFeedForward(n_model=n_model,
-                                           n_inner=n_inner,
-                                           activation=activation,
-                                           dropout=ffn_dropout)
-        self.ffn_norm = nn.LayerNorm(n_model)
-        self.dropout = nn.Dropout(dropout)
+#         self.self_attn = RelativePositionMultiHeadAttention(n_heads=n_heads,
+#                                                             n_model=n_model,
+#                                                             n_embed=n_model//n_heads,
+#                                                             dropout=attn_dropout)
+#         self.self_attn_norm = nn.LayerNorm(n_model)
+#         self.mha_attn = RelativePositionMultiHeadAttention(n_heads=n_heads,
+#                                                            n_model=n_model,
+#                                                            n_embed=n_model//n_heads,
+#                                                            dropout=attn_dropout)
+#         self.mha_attn_norm = nn.LayerNorm(n_model)
+#         self.ffn = PositionwiseFeedForward(n_model=n_model,
+#                                            n_inner=n_inner,
+#                                            activation=activation,
+#                                            dropout=ffn_dropout)
+#         self.ffn_norm = nn.LayerNorm(n_model)
+#         self.dropout = nn.Dropout(dropout)
 
-        self.pre_norm = pre_norm
+#         self.pre_norm = pre_norm
+
+
+# class RotaryPositionTransformerDecoderLayer(TransformerDecoderLayer):
+
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_inner: int = 2048,
+#         activation: str = 'relu',
+#         pre_norm: bool = False,
+#         attn_dropout: float = 0.1,
+#         ffn_dropout: float = 0.1,
+#         dropout: float = 0.1
+#     ) -> RotaryPositionTransformerDecoderLayer:
+#         super(RotaryPositionTransformerDecoderLayer, self).__init__()
+
+#         self.self_attn = RotaryPositionMultiHeadAttention(n_heads=n_heads,
+#                                                           n_model=n_model,
+#                                                           n_embed=n_model//n_heads,
+#                                                           dropout=attn_dropout)
+#         self.self_attn_norm = nn.LayerNorm(n_model)
+#         self.mha_attn = RotaryPositionMultiHeadAttention(n_heads=n_heads,
+#                                                          n_model=n_model,
+#                                                          n_embed=n_model//n_heads,
+#                                                          dropout=attn_dropout)
+#         self.mha_attn_norm = nn.LayerNorm(n_model)
+#         self.ffn = PositionwiseFeedForward(n_model=n_model,
+#                                            n_inner=n_inner,
+#                                            activation=activation,
+#                                            dropout=ffn_dropout)
+#         self.ffn_norm = nn.LayerNorm(n_model)
+#         self.dropout = nn.Dropout(dropout)
+
+#         self.pre_norm = pre_norm
 
 
 class MultiHeadAttention(nn.Module):
@@ -381,7 +417,9 @@ class MultiHeadAttention(nn.Module):
         n_embed: int = 128,
         dropout: float = 0.1,
         bias: bool = True,
-        attn: bool = False,
+        relation: bool = False,
+        cpd: bool = False,
+        softmax_head: bool = False
     ) -> MultiHeadAttention:
         super(MultiHeadAttention, self).__init__()
 
@@ -390,23 +428,40 @@ class MultiHeadAttention(nn.Module):
         self.n_embed = n_embed
         self.scale = n_embed**0.5
 
-        self.wq = nn.Linear(n_model, n_heads * n_embed, bias=bias)
-        self.wk = nn.Linear(n_model, n_heads * n_embed, bias=bias)
-        self.wv = nn.Linear(n_model, n_heads * n_embed, bias=bias)
-        self.wo = nn.Linear(n_heads * n_embed, n_model, bias=bias)
+        if cpd:
+            self.wqk1 = nn.Parameter(torch.Tensor(n_heads, n_embed))
+            self.wqk2 = nn.Parameter(torch.Tensor(n_model, n_embed))
+            self.wqk3 = nn.Parameter(torch.Tensor(n_model, n_embed))
+            self.wvo1 = nn.Parameter(torch.Tensor(n_heads, n_embed))
+            self.wvo2 = nn.Parameter(torch.Tensor(n_model, n_embed))
+            self.wvo3 = nn.Parameter(torch.Tensor(n_model, n_embed))
+        else:
+            self.wq = nn.Parameter(torch.Tensor(n_heads, n_model, n_embed))
+            self.wk = nn.Parameter(torch.Tensor(n_heads, n_model, n_embed))
+            self.wv = nn.Parameter(torch.Tensor(n_heads, n_model, n_embed))
+            self.wo = nn.Parameter(torch.Tensor(n_heads, n_embed, n_model))
         self.dropout = nn.Dropout(dropout)
 
         self.bias = bias
-        self.attn = attn
+        self.relation = relation
+        self.cpd = cpd
+        self.softmax_head = softmax_head
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        # borrowed from https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/multihead_attention.py
-        nn.init.xavier_uniform_(self.wq.weight, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wk.weight, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wv.weight, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wo.weight)
+        if self.cpd:
+            nn.init.xavier_normal_(self.wqk1)
+            nn.init.xavier_normal_(self.wqk2)
+            nn.init.xavier_normal_(self.wqk3)
+            nn.init.xavier_normal_(self.wvo1)
+            nn.init.xavier_normal_(self.wvo2)
+            nn.init.xavier_normal_(self.wvo3)
+        else:
+            nn.init.xavier_normal_(self.wq)
+            nn.init.xavier_normal_(self.wk)
+            nn.init.xavier_normal_(self.wv)
+            nn.init.xavier_normal_(self.wo)
 
     def forward(
         self,
@@ -416,164 +471,180 @@ class MultiHeadAttention(nn.Module):
         mask: torch.BoolTensor,
         attn_mask: Optional[torch.BoolTensor] = None
     ) -> torch.Tensor:
-        batch_size, _ = mask.shape
-        # [seq_len, batch_size * n_heads, n_embed]
-        q = self.wq(q).view(-1, batch_size * self.n_heads, self.n_embed)
-        k = self.wk(k).view(-1, batch_size * self.n_heads, self.n_embed)
-        v = self.wv(v).view(-1, batch_size * self.n_heads, self.n_embed)
+        batch_size, seq_len = mask.shape
+        # [batch_size, 1, 1, src_len]
+        mask = mask.view(batch_size, 1, 1, seq_len)
 
-        mask = mask.unsqueeze(1).repeat(1, self.n_heads, 1).view(-1, 1, *mask.shape[1:])
-        # [batch_size * n_heads, seq_len, src_len]
-        if attn_mask is not None:
-            mask = mask & attn_mask
-        # [batch_size * n_heads, seq_len, src_len]
-        attn = torch.bmm(q.transpose(0, 1) / self.scale, k.movedim((0, 1), (2, 0)))
-        attn = torch.softmax(attn + torch.where(mask, 0., float('-inf')), -1)
+        # # [batch_size * n_heads, seq_len, src_len]
+        # if attn_mask is not None:
+        #     mask = mask & attn_mask
+
+        if self.cpd:
+            attn = oe.contract('bkm,nh,mh,oh,blo->bnkl',
+                               *[q, self.wqk1, self.wqk2, self.wqk3, k],
+                               optimize='optimal', backend='torch')
+        else:
+            q = torch.einsum('blm,nmh->bnlh', [q, self.wq]) # [batch_size, n_heads, seq_len, n_embed]
+            k = torch.einsum('blm,nmh->bnlh', [k, self.wk]) # [batch_size, n_heads, seq_len, n_embed]
+            v = torch.einsum('blm,nmh->bnlh', [v, self.wv]) # [batch_size, n_heads, seq_len, n_embed]
+            attn = torch.matmul(q, k.transpose(-2, -1))     # [batch_size, n_heads, seq_len, src_len]
+        if self.relation:
+            relation = attn
+        attn /= self.scale
+        attn = attn + torch.where(mask, 0., float('-inf'))
+        if self.softmax_head:
+            attn = torch.reshape(attn.transpose(-1, -2), (batch_size, -1, seq_len)) # [batch_size, n_heads * src_len, seq_len]
+            attn = torch.reshape(torch.softmax(attn, 1), (batch_size, self.n_heads, -1, seq_len)).transpose(-1, -2)
+        else:
+            attn = torch.softmax(attn, -1)
         attn = self.dropout(attn)
-        # [seq_len, batch_size * n_heads, n_embed]
-        x = torch.bmm(attn, v.transpose(0, 1)).transpose(0, 1)
-        # [seq_len, batch_size, n_model]
-        x = self.wo(x.reshape(-1, batch_size, self.n_heads * self.n_embed))
+        if self.cpd:
+            x = oe.contract('bnkl,blm,nh,mh,oh->bko',
+                            *[attn, v, self.wvo1, self.wvo2, self.wvo3],
+                            optimize='optimal', backend='torch')
+        else:
+            x = torch.matmul(attn, v)                 # [batch_size, n_heads, seq_len, n_embed]
+            x = torch.matmul(x, self.wo).sum(dim = 1) # [batch_size, seq_len, n_model]
 
-        return (x, attn.view(batch_size, self.n_heads, *attn.shape[1:])) if self.attn else x
-
-
-class RelativePositionMultiHeadAttention(nn.Module):
-
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_embed: int = 128,
-        dropout: float = 0.1,
-        attn: bool = False
-    ) -> RelativePositionMultiHeadAttention:
-        super(RelativePositionMultiHeadAttention, self).__init__()
-
-        self.n_heads = n_heads
-        self.n_model = n_model
-        self.n_embed = n_embed
-        self.scale = n_embed**0.5
-
-        self.pos_embed = RelativePositionalEmbedding(n_model=n_embed)
-        self.wq = nn.Parameter(torch.zeros(n_model, n_heads * n_embed))
-        self.wk = nn.Parameter(torch.zeros(n_model, n_heads * n_embed))
-        self.wv = nn.Parameter(torch.zeros(n_model, n_heads * n_embed))
-        self.wo = nn.Parameter(torch.zeros(n_heads * n_embed, n_model))
-        self.bu = nn.Parameter(torch.zeros(n_heads, n_embed))
-        self.bv = nn.Parameter(torch.zeros(n_heads, n_embed))
-        self.dropout = nn.Dropout(dropout)
-
-        self.attn = attn
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        # borrowed from https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/multihead_attention.py
-        nn.init.xavier_uniform_(self.wq, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wk, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wv, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wo)
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.BoolTensor,
-        attn_mask: Optional[torch.BoolTensor] = None
-    ) -> torch.Tensor:
-        batch_size, _ = mask.shape
-        # [seq_len, batch_size, n_heads, n_embed]
-        q = F.linear(q, self.wq).view(-1, batch_size, self.n_heads, self.n_embed)
-        # [src_len, batch_size * n_heads, n_embed]
-        k = F.linear(k, self.wk).view(-1, batch_size * self.n_heads, self.n_embed)
-        v = F.linear(v, self.wv).view(-1, batch_size * self.n_heads, self.n_embed)
-        # [seq_len, src_len, n_embed]
-        p = self.pos_embed(q[:, 0, 0], k[:, 0])
-        # [seq_len, batch_size * n_heads, n_embed]
-        qu, qv = (q + self.bu).view(-1, *k.shape[1:]), (q + self.bv).view(-1, *k.shape[1:])
-
-        mask = mask.unsqueeze(1).repeat(1, self.n_heads, 1).view(-1, 1, *mask.shape[1:])
-        if attn_mask is not None:
-            mask = mask & attn_mask
-        # [batch_size * n_heads, seq_len, src_len]
-        attn = torch.bmm(qu.transpose(0, 1), k.movedim((0, 1), (2, 0)))
-        attn = attn + torch.matmul(qv.transpose(0, 1).unsqueeze(2), p.transpose(1, 2)).squeeze(2)
-        attn = torch.softmax(attn / self.scale + torch.where(mask, 0., float('-inf')), -1)
-        attn = self.dropout(attn)
-        # [seq_len, batch_size * n_heads, n_embed]
-        x = torch.bmm(attn, v.transpose(0, 1)).transpose(0, 1)
-        # [seq_len, batch_size, n_model]
-        x = F.linear(x.reshape(-1, batch_size, self.n_heads * self.n_embed), self.wo)
-
-        return (x, attn.view(batch_size, self.n_heads, *attn.shape[1:])) if self.attn else x
+        return (x, relation) if self.relation else x
 
 
-class RotaryPositionMultiHeadAttention(nn.Module):
+# class RelativePositionMultiHeadAttention(nn.Module):
 
-    def __init__(
-        self,
-        n_heads: int = 8,
-        n_model: int = 1024,
-        n_embed: int = 128,
-        dropout: float = 0.1,
-        bias: bool = True,
-        attn: bool = False
-    ) -> RotaryPositionMultiHeadAttention:
-        super(RotaryPositionMultiHeadAttention, self).__init__()
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_embed: int = 128,
+#         dropout: float = 0.1,
+#         attn: bool = False
+#     ) -> RelativePositionMultiHeadAttention:
+#         super(RelativePositionMultiHeadAttention, self).__init__()
 
-        self.n_heads = n_heads
-        self.n_model = n_model
-        self.n_embed = n_embed
-        self.scale = n_embed**0.5
+#         self.n_heads = n_heads
+#         self.n_model = n_model
+#         self.n_embed = n_embed
+#         self.scale = n_embed**0.5
 
-        self.pos_embed = RotaryPositionalEmbedding(n_model=n_embed)
-        self.wq = nn.Linear(n_model, n_heads * n_embed, bias=bias)
-        self.wk = nn.Linear(n_model, n_heads * n_embed, bias=bias)
-        self.wv = nn.Linear(n_model, n_heads * n_embed, bias=bias)
-        self.wo = nn.Linear(n_heads * n_embed, n_model, bias=bias)
-        self.dropout = nn.Dropout(dropout)
+#         self.pos_embed = RelativePositionalEmbedding(n_model=n_embed)
+#         self.wq = nn.Parameter(torch.zeros(n_model, n_heads * n_embed))
+#         self.wk = nn.Parameter(torch.zeros(n_model, n_heads * n_embed))
+#         self.wv = nn.Parameter(torch.zeros(n_model, n_heads * n_embed))
+#         self.wo = nn.Parameter(torch.zeros(n_heads * n_embed, n_model))
+#         self.bu = nn.Parameter(torch.zeros(n_heads, n_embed))
+#         self.bv = nn.Parameter(torch.zeros(n_heads, n_embed))
+#         self.dropout = nn.Dropout(dropout)
 
-        self.attn = attn
+#         self.attn = attn
 
-        self.reset_parameters()
+#         self.reset_parameters()
 
-    def reset_parameters(self):
-        # borrowed from https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/multihead_attention.py
-        nn.init.xavier_uniform_(self.wq.weight, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wk.weight, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wv.weight, 2 ** -0.5)
-        nn.init.xavier_uniform_(self.wo.weight)
+#     def reset_parameters(self):
+#         # borrowed from https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/multihead_attention.py
+#         nn.init.xavier_uniform_(self.wq, 2 ** -0.5)
+#         nn.init.xavier_uniform_(self.wk, 2 ** -0.5)
+#         nn.init.xavier_uniform_(self.wv, 2 ** -0.5)
+#         nn.init.xavier_uniform_(self.wo)
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.BoolTensor,
-        attn_mask: Optional[torch.BoolTensor] = None
-    ) -> torch.Tensor:
-        batch_size, _ = mask.shape
-        # [seq_len, batch_size * n_heads, n_embed]
-        q = self.pos_embed(self.wq(q).view(-1, batch_size * self.n_heads, self.n_embed))
-        k = self.pos_embed(self.wk(k).view(-1, batch_size * self.n_heads, self.n_embed))
-        v = self.wv(v).view(-1, batch_size * self.n_heads, self.n_embed)
+#     def forward(
+#         self,
+#         q: torch.Tensor,
+#         k: torch.Tensor,
+#         v: torch.Tensor,
+#         mask: torch.BoolTensor,
+#         attn_mask: Optional[torch.BoolTensor] = None
+#     ) -> torch.Tensor:
+#         batch_size, _ = mask.shape
+#         # [seq_len, batch_size, n_heads, n_embed]
+#         q = F.linear(q, self.wq).view(-1, batch_size, self.n_heads, self.n_embed)
+#         # [src_len, batch_size * n_heads, n_embed]
+#         k = F.linear(k, self.wk).view(-1, batch_size * self.n_heads, self.n_embed)
+#         v = F.linear(v, self.wv).view(-1, batch_size * self.n_heads, self.n_embed)
+#         # [seq_len, src_len, n_embed]
+#         p = self.pos_embed(q[:, 0, 0], k[:, 0])
+#         # [seq_len, batch_size * n_heads, n_embed]
+#         qu, qv = (q + self.bu).view(-1, *k.shape[1:]), (q + self.bv).view(-1, *k.shape[1:])
 
-        mask = mask.unsqueeze(1).repeat(1, self.n_heads, 1).view(-1, 1, *mask.shape[1:])
-        # [batch_size * n_heads, seq_len, src_len]
-        if attn_mask is not None:
-            mask = mask & attn_mask
-        # [batch_size * n_heads, seq_len, src_len]
-        attn = torch.bmm(q.transpose(0, 1) / self.scale, k.movedim((0, 1), (2, 0)))
-        attn = torch.softmax(attn + torch.where(mask, 0., float('-inf')), -1)
-        attn = self.dropout(attn)
-        # [seq_len, batch_size * n_heads, n_embed]
-        x = torch.bmm(attn, v.transpose(0, 1)).transpose(0, 1)
-        # [seq_len, batch_size, n_model]
-        x = self.wo(x.reshape(-1, batch_size, self.n_heads * self.n_embed))
+#         mask = mask.unsqueeze(1).repeat(1, self.n_heads, 1).view(-1, 1, *mask.shape[1:])
+#         if attn_mask is not None:
+#             mask = mask & attn_mask
+#         # [batch_size * n_heads, seq_len, src_len]
+#         attn = torch.bmm(qu.transpose(0, 1), k.movedim((0, 1), (2, 0)))
+#         attn = attn + torch.matmul(qv.transpose(0, 1).unsqueeze(2), p.transpose(1, 2)).squeeze(2)
+#         attn = torch.softmax(attn / self.scale + torch.where(mask, 0., float('-inf')), -1)
+#         attn = self.dropout(attn)
+#         # [seq_len, batch_size * n_heads, n_embed]
+#         x = torch.bmm(attn, v.transpose(0, 1)).transpose(0, 1)
+#         # [seq_len, batch_size, n_model]
+#         x = F.linear(x.reshape(-1, batch_size, self.n_heads * self.n_embed), self.wo)
 
-        return (x, attn.view(batch_size, self.n_heads, *attn.shape[1:])) if self.attn else x
+#         return (x, attn.view(batch_size, self.n_heads, *attn.shape[1:])) if self.attn else x
+
+
+# class RotaryPositionMultiHeadAttention(nn.Module):
+
+#     def __init__(
+#         self,
+#         n_heads: int = 8,
+#         n_model: int = 1024,
+#         n_embed: int = 128,
+#         dropout: float = 0.1,
+#         bias: bool = True,
+#         attn: bool = False
+#     ) -> RotaryPositionMultiHeadAttention:
+#         super(RotaryPositionMultiHeadAttention, self).__init__()
+
+#         self.n_heads = n_heads
+#         self.n_model = n_model
+#         self.n_embed = n_embed
+#         self.scale = n_embed**0.5
+
+#         self.pos_embed = RotaryPositionalEmbedding(n_model=n_embed)
+#         self.wq = nn.Linear(n_model, n_heads * n_embed, bias=bias)
+#         self.wk = nn.Linear(n_model, n_heads * n_embed, bias=bias)
+#         self.wv = nn.Linear(n_model, n_heads * n_embed, bias=bias)
+#         self.wo = nn.Linear(n_heads * n_embed, n_model, bias=bias)
+#         self.dropout = nn.Dropout(dropout)
+
+#         self.attn = attn
+
+#         self.reset_parameters()
+
+#     def reset_parameters(self):
+#         # borrowed from https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/multihead_attention.py
+#         nn.init.xavier_uniform_(self.wq.weight, 2 ** -0.5)
+#         nn.init.xavier_uniform_(self.wk.weight, 2 ** -0.5)
+#         nn.init.xavier_uniform_(self.wv.weight, 2 ** -0.5)
+#         nn.init.xavier_uniform_(self.wo.weight)
+
+#     def forward(
+#         self,
+#         q: torch.Tensor,
+#         k: torch.Tensor,
+#         v: torch.Tensor,
+#         mask: torch.BoolTensor,
+#         attn_mask: Optional[torch.BoolTensor] = None
+#     ) -> torch.Tensor:
+#         batch_size, _ = mask.shape
+#         # [seq_len, batch_size * n_heads, n_embed]
+#         q = self.pos_embed(self.wq(q).view(-1, batch_size * self.n_heads, self.n_embed))
+#         k = self.pos_embed(self.wk(k).view(-1, batch_size * self.n_heads, self.n_embed))
+#         v = self.wv(v).view(-1, batch_size * self.n_heads, self.n_embed)
+
+#         mask = mask.unsqueeze(1).repeat(1, self.n_heads, 1).view(-1, 1, *mask.shape[1:])
+#         # [batch_size * n_heads, seq_len, src_len]
+#         if attn_mask is not None:
+#             mask = mask & attn_mask
+#         # [batch_size * n_heads, seq_len, src_len]
+#         attn = torch.bmm(q.transpose(0, 1) / self.scale, k.movedim((0, 1), (2, 0)))
+#         attn = torch.softmax(attn + torch.where(mask, 0., float('-inf')), -1)
+#         attn = self.dropout(attn)
+#         # [seq_len, batch_size * n_heads, n_embed]
+#         x = torch.bmm(attn, v.transpose(0, 1)).transpose(0, 1)
+#         # [seq_len, batch_size, n_model]
+#         x = self.wo(x.reshape(-1, batch_size, self.n_heads * self.n_embed))
+
+#         return (x, attn.view(batch_size, self.n_heads, *attn.shape[1:])) if self.attn else x
 
 
 class PositionwiseFeedForward(nn.Module):

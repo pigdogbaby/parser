@@ -136,13 +136,28 @@ class BiaffineSemanticDependencyModel(Model):
                  **kwargs):
         super().__init__(**Config().update(locals()))
 
-        self.edge_mlp_d = MLP(n_in=self.args.n_encoder_hidden, n_out=n_edge_mlp, dropout=edge_mlp_dropout, activation=False)
-        self.edge_mlp_h = MLP(n_in=self.args.n_encoder_hidden, n_out=n_edge_mlp, dropout=edge_mlp_dropout, activation=False)
-        self.label_mlp_d = MLP(n_in=self.args.n_encoder_hidden, n_out=n_label_mlp, dropout=label_mlp_dropout, activation=False)
-        self.label_mlp_h = MLP(n_in=self.args.n_encoder_hidden, n_out=n_label_mlp, dropout=label_mlp_dropout, activation=False)
+        if self.args.encoder == 'bert':
+            n_encoder_heads = self.encoder.num_attention_heads
+            n_encoder_hidden = self.encoder.hidden_size
+        else:
+            n_encoder_heads = self.args.n_encoder_heads
+            n_encoder_hidden = self.args.n_encoder_hidden
+        self.relation = self.args.relation
+        if self.relation:
+            self.edge_mlp_1 = MLP(n_in=n_encoder_heads, n_out=n_edge_mlp, dropout=0, activation=True)
+            self.edge_mlp_2 = MLP(n_in=n_edge_mlp, n_out=2, dropout=edge_mlp_dropout, activation=False)
+            self.label_mlp_1 = MLP(n_in=n_encoder_heads, n_out=n_label_mlp, dropout=0, activation=True)
+            self.label_mlp_2 = MLP(n_in=n_label_mlp, n_out=n_labels, dropout=label_mlp_dropout, activation=False)
+            # self.edge_mlp = MLP(n_in=n_encoder_heads, n_out=2, dropout=edge_mlp_dropout, activation=False)
+            # self.label_mlp = MLP(n_in=n_encoder_heads, n_out=n_labels, dropout=label_mlp_dropout, activation=False)
+        else:
+            self.edge_mlp_d = MLP(n_in=n_encoder_hidden, n_out=n_edge_mlp, dropout=edge_mlp_dropout, activation=False)
+            self.edge_mlp_h = MLP(n_in=n_encoder_hidden, n_out=n_edge_mlp, dropout=edge_mlp_dropout, activation=False)
+            self.label_mlp_d = MLP(n_in=n_encoder_hidden, n_out=n_label_mlp, dropout=label_mlp_dropout, activation=False)
+            self.label_mlp_h = MLP(n_in=n_encoder_hidden, n_out=n_label_mlp, dropout=label_mlp_dropout, activation=False)
 
-        self.edge_attn = Biaffine(n_in=n_edge_mlp, n_out=2, bias_x=True, bias_y=True)
-        self.label_attn = Biaffine(n_in=n_label_mlp, n_out=n_labels, bias_x=True, bias_y=True)
+            self.edge_attn = Biaffine(n_in=n_edge_mlp, n_out=2, bias_x=True, bias_y=True)
+            self.label_attn = Biaffine(n_in=n_label_mlp, n_out=n_labels, bias_x=True, bias_y=True)
         self.criterion = nn.CrossEntropyLoss()
 
     def load_pretrained(self, embed=None):
@@ -172,15 +187,24 @@ class BiaffineSemanticDependencyModel(Model):
 
         x = self.encode(words, feats)
 
-        edge_d = self.edge_mlp_d(x)
-        edge_h = self.edge_mlp_h(x)
-        label_d = self.label_mlp_d(x)
-        label_h = self.label_mlp_h(x)
+        if self.relation:
+            edge = self.edge_mlp_1(x)
+            label = self.label_mlp_1(x)
+            
+            s_edge = self.edge_mlp_2(edge)
+            s_label = self.label_mlp_2(label)
+            # s_edge = self.edge_mlp(x)
+            # s_label = self.label_mlp(x)
+        else:
+            edge_d = self.edge_mlp_d(x)
+            edge_h = self.edge_mlp_h(x)
+            label_d = self.label_mlp_d(x)
+            label_h = self.label_mlp_h(x)
 
-        # [batch_size, seq_len, seq_len, 2]
-        s_edge = self.edge_attn(edge_d, edge_h).permute(0, 2, 3, 1)
-        # [batch_size, seq_len, seq_len, n_labels]
-        s_label = self.label_attn(label_d, label_h).permute(0, 2, 3, 1)
+            # [batch_size, seq_len, seq_len, 2]
+            s_edge = self.edge_attn(edge_d, edge_h).permute(0, 2, 3, 1)
+            # [batch_size, seq_len, seq_len, n_labels]
+            s_label = self.label_attn(label_d, label_h).permute(0, 2, 3, 1)
 
         return s_edge, s_label
 

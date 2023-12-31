@@ -71,6 +71,7 @@ class Config(object):
     @classmethod
     def load(cls, conf: str = '', unknown: Optional[Sequence[str]] = None, **kwargs: Any) -> Config:
         if conf and not os.path.exists(conf):
+            # print(supar.CONFIG['github'].get(conf, conf))
             conf = download(supar.CONFIG['github'].get(conf, conf))
         if conf.endswith(('.yml', '.yaml')):
             config = OmegaConf.load(conf)
