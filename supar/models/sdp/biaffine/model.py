@@ -137,19 +137,19 @@ class BiaffineSemanticDependencyModel(Model):
         super().__init__(**Config().update(locals()))
 
         if self.args.encoder == 'bert':
-            n_encoder_heads = self.encoder.num_attention_heads
+            rank = self.encoder.rank
             n_encoder_hidden = self.encoder.hidden_size
         else:
-            n_encoder_heads = self.args.n_encoder_heads
+            rank = self.args.n_encoder_heads
             n_encoder_hidden = self.args.n_encoder_hidden
         self.relation = self.args.relation
         if self.relation:
-            self.edge_mlp_1 = MLP(n_in=n_encoder_heads, n_out=n_edge_mlp, dropout=0, activation=True)
+            self.edge_mlp_1 = MLP(n_in=rank, n_out=n_edge_mlp, dropout=0, activation=True)
             self.edge_mlp_2 = MLP(n_in=n_edge_mlp, n_out=2, dropout=edge_mlp_dropout, activation=False)
-            self.label_mlp_1 = MLP(n_in=n_encoder_heads, n_out=n_label_mlp, dropout=0, activation=True)
+            self.label_mlp_1 = MLP(n_in=rank, n_out=n_label_mlp, dropout=0, activation=True)
             self.label_mlp_2 = MLP(n_in=n_label_mlp, n_out=n_labels, dropout=label_mlp_dropout, activation=False)
-            # self.edge_mlp = MLP(n_in=n_encoder_heads, n_out=2, dropout=edge_mlp_dropout, activation=False)
-            # self.label_mlp = MLP(n_in=n_encoder_heads, n_out=n_labels, dropout=label_mlp_dropout, activation=False)
+            # self.edge_mlp = MLP(n_in=rank, n_out=2, dropout=edge_mlp_dropout, activation=False)
+            # self.label_mlp = MLP(n_in=rank, n_out=n_labels, dropout=label_mlp_dropout, activation=False)
         else:
             self.edge_mlp_d = MLP(n_in=n_encoder_hidden, n_out=n_edge_mlp, dropout=edge_mlp_dropout, activation=False)
             self.edge_mlp_h = MLP(n_in=n_encoder_hidden, n_out=n_edge_mlp, dropout=edge_mlp_dropout, activation=False)

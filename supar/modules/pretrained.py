@@ -68,7 +68,7 @@ class TransformerEmbedding(nn.Module):
                 self.model = RobertaModel.from_pretrained(name, local_files_only=False)
             self.model = self.model.requires_grad_(finetune)
             config = AutoConfig.from_pretrained(f"/home/wuyou/parser/{name}.json", output_hidden_states=True, output_attentions=relation)
-            self.encoder = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, elementwise=elementwise, concate=True)
+            self.encoder = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, concate=True)
         else:
             if finetune:
                 try:
@@ -84,7 +84,7 @@ class TransformerEmbedding(nn.Module):
         self.name = name
         self.n_layers = n_layers or self.model.config.num_hidden_layers
         self.hidden_size = self.encoder.config.hidden_size if concate else self.model.config.hidden_size
-        self.num_attention_heads = self.encoder.config.num_attention_heads if concate else self.model.config.num_attention_heads
+        self.rank = rank if cpd else self.encoder.config.num_attention_heads if concate else self.model.config.num_attention_heads
         self.n_out = n_out or self.hidden_size
         self.pooling = pooling
         self.pad_index = pad_index
@@ -179,7 +179,7 @@ class TransformerEmbedding(nn.Module):
         #         torch.Size([35, 16, 22, 22])
         if self.relation:
             x = x.attentions
-            # [batch_size, max_len, max_len, num_attention_heads]
+            # [batch_size, max_len, max_len, rank]
             x = self.scalar_mix(x[-self.n_layers:]).permute(0, 2, 3, 1)
         else:
             x = x.hidden_states
@@ -196,8 +196,8 @@ class TransformerEmbedding(nn.Module):
         if self.relation:
             mask = torch.einsum('bim,bjn->bimjn', [mask, mask])
             token_mask = torch.einsum('bi,bj->bij', [token_mask, token_mask])
-            # [batch_size, seq_len, fix_len, seq_len, fix_len, num_attention_heads]
-            x = x.new_zeros(*mask.shape, self.num_attention_heads).masked_scatter_(mask.unsqueeze(-1), x[token_mask])
+            # [batch_size, seq_len, fix_len, seq_len, fix_len, rank]
+            x = x.new_zeros(*mask.shape, self.rank).masked_scatter_(mask.unsqueeze(-1), x[token_mask])
             if self.pooling == 'first':
                 x = x[:, :, 0, :, 0]
             elif self.pooling == 'mean':
