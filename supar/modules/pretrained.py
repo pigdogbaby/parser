@@ -56,6 +56,7 @@ class TransformerEmbedding(nn.Module):
         relation: bool = False,
         cpd: bool = False,
         softmax_head: bool = False,
+        edge_attn: bool = False,
         concate: bool = False
     ) -> TransformerEmbedding:
         super().__init__()
@@ -67,8 +68,9 @@ class TransformerEmbedding(nn.Module):
             except Exception:
                 self.model = RobertaModel.from_pretrained(name, local_files_only=False)
             self.model = self.model.requires_grad_(finetune)
-            config = AutoConfig.from_pretrained(f"/home/wuyou/parser/{name}.json", output_hidden_states=True, output_attentions=relation)
-            self.encoder = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, concate=True)
+            config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
+            self.encoder = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, concate=True)
+        # deprecated
         else:
             if finetune:
                 try:
@@ -76,7 +78,7 @@ class TransformerEmbedding(nn.Module):
                 except Exception:
                     self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, output_attentions=relation, local_files_only=False)
             else:
-                config = AutoConfig.from_pretrained(f"/home/wuyou/parser/{name}.json", output_hidden_states=True, output_attentions=relation)
+                config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
                 self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head)
             self.model = self.model.requires_grad_(True)
         self.tokenizer = TransformerTokenizer(name)

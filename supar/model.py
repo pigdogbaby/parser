@@ -123,6 +123,7 @@ class Model(nn.Module):
                                                 relation=self.args.relation,
                                                 cpd=self.args.cpd,
                                                 softmax_head=self.args.softmax_head,
+                                                edge_attn=self.args.edge_attn,
                                                 concate=self.args.concate)
             self.encoder_dropout = nn.Dropout(p=self.args.encoder_dropout)
             self.args.n_encoder_hidden = self.encoder.n_out
