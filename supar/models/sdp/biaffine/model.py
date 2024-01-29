@@ -140,7 +140,6 @@ class BiaffineSemanticDependencyModel(Model):
             rank = self.encoder.rank
             n_encoder_hidden = self.encoder.hidden_size
         else:
-            rank = self.args.n_encoder_heads
             n_encoder_hidden = self.args.n_encoder_hidden
         self.relation = self.args.relation
         if self.relation:

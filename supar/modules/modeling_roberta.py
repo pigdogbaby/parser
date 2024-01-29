@@ -176,20 +176,16 @@ class EdgeAttention(nn.Module):
         
     def forward(self, state, mask=None, prev=None):
         if prev is not None:
-            state += prev
+            state = state + prev
         state = state.permute(0, 2, 3, 1)
         # mask signature: bxay
         num_batches = state.size(0)
         num_nodes = state.size(1)
        
-        left_k = self.w_q(state)
-        right_k = self.w_k(state)
-        left_v = self.w_v1(state)
-        right_v = self.w_v2(state)
-        left_k = left_k.view(num_batches, num_nodes, num_nodes, self.num_heads, self.d_k)
-        right_k = right_k.view_as(left_k)
-        left_v = left_v.view_as(left_k)
-        right_v = right_v.view_as(left_k)
+        left_k = self.w_q(state).view(num_batches, num_nodes, num_nodes, self.num_heads, self.d_k)
+        right_k = self.w_k(state).view_as(left_k)
+        left_v = self.w_v1(state).view_as(left_k)
+        right_v = self.w_v2(state).view_as(left_k)
 
         scores = torch.einsum("bxahd,bayhd->bxayh", left_k, right_k) / math.sqrt(self.d_k)
         if mask is not None:
@@ -198,8 +194,7 @@ class EdgeAttention(nn.Module):
         att = self.dropout1(att)
 
         val = torch.einsum("bxahd,bayhd->bxayhd", left_v, right_v)
-        x = torch.einsum("bxayh,bxayhd->bxyhd", att, val)
-        x = x.view(num_batches,num_nodes, num_nodes, self.d_model)
+        x = torch.einsum("bxayh,bxayhd->bxyhd", att, val).view(num_batches, num_nodes, num_nodes, self.d_model)
         x = self.norm1(self.dropout2(self.w_o(x)) + state)
         x = self.norm2(self.dropout3(self.linear2((self.act(self.linear1(x))))) + x)
         return x.permute(0, 3, 1, 2)

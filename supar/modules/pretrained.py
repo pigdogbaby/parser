@@ -70,7 +70,6 @@ class TransformerEmbedding(nn.Module):
             self.model = self.model.requires_grad_(finetune)
             config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
             self.encoder = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, concate=True)
-        # deprecated
         else:
             if finetune:
                 try:
@@ -79,7 +78,7 @@ class TransformerEmbedding(nn.Module):
                     self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, output_attentions=relation, local_files_only=False)
             else:
                 config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
-                self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head)
+                self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn)
             self.model = self.model.requires_grad_(True)
         self.tokenizer = TransformerTokenizer(name)
 
@@ -142,8 +141,7 @@ class TransformerEmbedding(nn.Module):
         # [  30,    1,    1,    1],
         # [1112,    1,    1,    1],
         # [1858,    1,    1,    1],
-        # [ 479,    1,    1,    1],
-        # [   1,    1,    1,    1]], device='cuda:0')
+        # [ 479,    1,    1,    1],        # [   1,    1,    1,    1]], device='cuda:0')
         mask = tokens.ne(self.pad_index)
         lens = mask.sum((1, 2))
         # [batch_size, n_tokens]
@@ -159,8 +157,6 @@ class TransformerEmbedding(nn.Module):
 
         # return the hidden states of all layers
         x = self.model(tokens[:, :self.max_len], attention_mask=token_mask[:, :self.max_len].float())
-        if self.concate:
-            x = self.encoder(x.last_hidden_state, attention_mask=token_mask[:, :self.max_len].float())
         # if x.last_hidden_state is not None:
         #     print("last_hidden_state")
         #     print(x.last_hidden_state.shape)
@@ -179,23 +175,18 @@ class TransformerEmbedding(nn.Module):
         #     for i in x.attentions:
         #         print(i.shape)
         #         torch.Size([35, 16, 22, 22])
-        if self.relation:
-            x = x.attentions
-            # [batch_size, max_len, max_len, rank]
-            x = self.scalar_mix(x[-self.n_layers:]).permute(0, 2, 3, 1)
-        else:
-            x = x.hidden_states
-            # [batch_size, max_len, hidden_size]
-            x = self.scalar_mix(x[-self.n_layers:])
-            # [batch_size, n_tokens, hidden_size]
-            for i in range(self.stride, (tokens.shape[1]-self.max_len+self.stride-1)//self.stride*self.stride+1, self.stride):
-                part = self.model(tokens[:, i:i+self.max_len], attention_mask=token_mask[:, i:i+self.max_len].float())[-1]
-                x = torch.cat((x, self.scalar_mix(part[-self.n_layers:])[:, self.max_len-self.stride:]), 1)
+        if self.concate:
+            x = self.encoder(x.last_hidden_state, attention_mask=token_mask[:, :self.max_len].float())
+
         # [batch_size, seq_len]
         lens = mask.sum(-1)
         # the length of each token, padding token is 0, now replace 0 with 1 to avoid divide 0 exception
         lens = lens.masked_fill_(lens.eq(0), 1)
         if self.relation:
+            x = x.attentions
+            # [batch_size, max_len, max_len, rank]
+            x = self.scalar_mix(x[-self.n_layers:]).permute(0, 2, 3, 1)
+
             mask = torch.einsum('bim,bjn->bimjn', [mask, mask])
             token_mask = torch.einsum('bi,bj->bij', [token_mask, token_mask])
             # [batch_size, seq_len, fix_len, seq_len, fix_len, rank]
@@ -208,6 +199,14 @@ class TransformerEmbedding(nn.Module):
             elif self.pooling:
                 raise RuntimeError(f'Unsupported pooling method "{self.pooling}"!')
         else:
+            x = x.hidden_states
+            # [batch_size, max_len, hidden_size]
+            x = self.scalar_mix(x[-self.n_layers:])
+            # [batch_size, n_tokens, hidden_size]
+            for i in range(self.stride, (tokens.shape[1]-self.max_len+self.stride-1)//self.stride*self.stride+1, self.stride):
+                part = self.model(tokens[:, i:i+self.max_len], attention_mask=token_mask[:, i:i+self.max_len].float())[-1]
+                x = torch.cat((x, self.scalar_mix(part[-self.n_layers:])[:, self.max_len-self.stride:]), 1)
+
             # [batch_size, seq_len, fix_len, hidden_size]
             # x[token_mask]: [tot_len (< batch_size * seq_len), hidden_size]
             x = x.new_zeros(*mask.shape, self.hidden_size).masked_scatter_(mask.unsqueeze(-1), x[token_mask])
