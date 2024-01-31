@@ -48,7 +48,6 @@ $ spython -u -m supar.cmds.sdp.biaffine train -b -c dm.biaffine.sdp.roberta.ini 
 To evaluate:
 ```sh
 $ spython -u -m supar.cmds.sdp.biaffine evaluate -c dm.biaffine.sdp.roberta.ini -d 0 -p model
---data data/sdp/DM/test.en.ood.dm.conllu
 --data data/sdp/PAS/test.en.ood.pas.conllu
 --data data/sdp/PSD/test.en.ood.psd.conllu
 ```

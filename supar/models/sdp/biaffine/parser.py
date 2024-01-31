@@ -151,7 +151,7 @@ class BiaffineSemanticDependencyParser(Parser):
         WORD = Field('words', pad=PAD, unk=UNK, bos=BOS, lower=True)
         TAG, CHAR, LEMMA, ELMO, BERT = None, None, None, None, None
         if args.encoder == 'bert':
-            t = TransformerTokenizer(args.bert)
+            t = TransformerTokenizer('roberta-base')
             WORD = SubwordField('words', pad=t.pad, unk=t.unk, bos=t.bos, fix_len=args.fix_len, tokenize=t)
             WORD.vocab = t.vocab
         else:

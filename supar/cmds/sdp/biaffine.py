@@ -27,7 +27,7 @@ def main():
     # evaluate
     subparser = subparsers.add_parser('evaluate', help='Evaluate the specified parser and dataset.')
     subparser.add_argument('--buckets', default=8, type=int, help='max num of buckets to use')
-    subparser.add_argument('--data', default='data/sdp/DM/test.conllu', help='path to dataset')
+    subparser.add_argument('--data', default='data/sdp/DM/test.en.ood.dm.conllu', help='path to dataset')
     # predict
     subparser = subparsers.add_parser('predict', help='Use a trained parser to make predictions.')
     subparser.add_argument('--buckets', default=8, type=int, help='max num of buckets to use')

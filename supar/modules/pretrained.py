@@ -80,7 +80,7 @@ class TransformerEmbedding(nn.Module):
                 config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
                 self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn)
             self.model = self.model.requires_grad_(True)
-        self.tokenizer = TransformerTokenizer(name)
+        self.tokenizer = TransformerTokenizer('roberta-base')
 
         self.name = name
         self.n_layers = n_layers or self.model.config.num_hidden_layers
