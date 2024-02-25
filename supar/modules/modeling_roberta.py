@@ -127,9 +127,9 @@ class RobertaEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        if self.position_embedding_type == "absolute":
-            position_embeddings = self.position_embeddings(position_ids)
-            embeddings += position_embeddings
+        # if self.position_embedding_type == "absolute":
+        #     position_embeddings = self.position_embeddings(position_ids)
+        #     embeddings += position_embeddings
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -210,6 +210,8 @@ class CustomRobertaSelfAttention(nn.Module):
         self.cpd = cpd
         self.softmax_head = softmax_head
         self.edge_attn = EdgeAttention(rank) if edge_attn else None
+        self.max_position_embeddings = 16
+        self.distance_embedding = nn.Embedding(2 * self.max_position_embeddings + 1, self.rank)
 
         if self.cpd:
             self.wqk1 = nn.Parameter(torch.Tensor(self.num_attention_heads, self.rank))
@@ -248,21 +250,31 @@ class CustomRobertaSelfAttention(nn.Module):
     ) -> Tuple[torch.Tensor]:
         batch_size, seq_len, _ = hidden_states.shape
         if self.cpd:
-            attention_scores = oe.contract('bkm,mh,oh,blo->bhkl',
-                                           *[hidden_states, self.wqk2, self.wqk3, hidden_states],
-                                           optimize='optimal', backend='torch')
-            attention_probs = oe.contract('nh,bhkl->bnkl',
-                                           *[self.wqk1, attention_scores],
-                                           optimize='optimal', backend='torch')
+            q = torch.einsum('blm,mr->brl', [hidden_states, self.wqk2])
+            k = torch.einsum('blm,mr->brl', [hidden_states, self.wqk3])
+            attention_scores = torch.einsum('bri,brj->brij', [q, k])
         else:
             q = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wq]) # [batch_size, n_heads, seq_len, n_embed]
             k = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wk]) # [batch_size, n_heads, seq_len, n_embed]
             v = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wv]) # [batch_size, n_heads, seq_len, n_embed]
             attention_scores = torch.matmul(q, k.transpose(-2, -1))     # [batch_size, n_heads, seq_len, src_len]
-            attention_probs = attention_scores / math.sqrt(self.rank)
+
+        position_ids_l = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+        position_ids_r = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(1, -1)
+        distance = torch.clamp(position_ids_l - position_ids_r, -self.max_position_embeddings, self.max_position_embeddings)
+        positional_embedding = self.distance_embedding(distance + self.max_position_embeddings)
+        positional_embedding = positional_embedding.to(dtype=hidden_states.dtype).permute(2, 0, 1)
+        if not self.cpd:
+            positional_embedding = torch.einsum("bnih,hij->bnij", q, positional_embedding)
+        attention_scores = attention_scores + positional_embedding
 
         if self.edge_attn is not None:
             attention_scores = self.edge_attn(attention_scores, edge_attention_mask, prev)
+
+        if self.cpd:
+            attention_probs = torch.einsum('nr,brij->bnij', [self.wqk1, attention_scores])
+        else:
+            attention_probs = attention_scores / math.sqrt(self.rank)
 
         # [batch_size, 1, 1, src_len]
         if attention_mask is not None:
@@ -281,7 +293,7 @@ class CustomRobertaSelfAttention(nn.Module):
         attention_probs = self.attn_dropout(attention_probs)
 
         if self.cpd:
-            context_layer = oe.contract('bnkl,blm,nh,mh,oh->bko',
+            context_layer = oe.contract('bnij,bjm,nr,mr,or->bio',
                                         *[attention_probs, hidden_states, self.wvo1, self.wvo2, self.wvo3],
                                         optimize='optimal', backend='torch')
         else:

@@ -40,7 +40,7 @@ $ python -u -m supar.cmds.sdp.vi train -b -c sdp-vi-en -d 1 -f tag char lemma -p
 
 To finetune [`robert-large`](https://huggingface.co/roberta-large):
 ```sh
-$ spython -u -m supar.cmds.sdp.biaffine train -b -c dm.biaffine.sdp.roberta.ini -d 0 -p model --encoder bert --bert roberta-base
+$ spython -u -m supar.cmds.sdp.biaffine train -b -c dm.biaffine.sdp.roberta.ini -d 0 -p model --encoder bert --bert roberta-medium
 --train data/sdp/PAS/train.en.pas.conllu --dev data/sdp/PAS/dev.en.pas.conllu --test data/sdp/PAS/test.en.id.pas.conllu
 --train data/sdp/PSD/train.en.psd.conllu --dev data/sdp/PSD/dev.en.psd.conllu --test data/sdp/PSD/test.en.id.psd.conllu
 ```
