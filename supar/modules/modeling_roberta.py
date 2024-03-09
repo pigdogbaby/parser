@@ -45,6 +45,8 @@ from transformers.utils import (
 )
 from transformers.models.roberta.configuration_roberta import RobertaConfig
 
+from .edge_tsfm import EdgeTransformerEncoder
+
 import opt_einsum as oe
 
 logger = logging.get_logger(__name__)
@@ -127,9 +129,9 @@ class RobertaEmbeddings(nn.Module):
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        # if self.position_embedding_type == "absolute":
-        #     position_embeddings = self.position_embeddings(position_ids)
-        #     embeddings += position_embeddings
+        if self.position_embedding_type == "absolute":
+            position_embeddings = self.position_embeddings(position_ids)
+            embeddings += position_embeddings
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -162,8 +164,7 @@ class EdgeAttention(nn.Module):
 
         self.w_q = nn.Linear(d_model, d_model)
         self.w_k = nn.Linear(d_model, d_model)
-        self.w_v1 = nn.Linear(d_model, d_model)
-        self.w_v2 = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
         self.w_o = nn.Linear(d_model, d_model)
         self.linear1 = nn.Linear(d_model, d_model * 4)
         self.linear2 = nn.Linear(d_model * 4, d_model)
@@ -182,19 +183,31 @@ class EdgeAttention(nn.Module):
         num_batches = state.size(0)
         num_nodes = state.size(1)
        
-        left_k = self.w_q(state).view(num_batches, num_nodes, num_nodes, self.num_heads, self.d_k)
-        right_k = self.w_k(state).view_as(left_k)
-        left_v = self.w_v1(state).view_as(left_k)
-        right_v = self.w_v2(state).view_as(left_k)
+        q = self.w_q(state).view(num_batches, num_nodes, num_nodes, self.num_heads, self.d_k)
+        k = self.w_k(state).view_as(q)
+        v = self.w_v(state).view_as(q)
 
-        scores = torch.einsum("bxahd,bayhd->bxayh", left_k, right_k) / math.sqrt(self.d_k)
+        # scores = torch.einsum("bxahd,bayhd->bxayh", q, k) / math.sqrt(self.d_k)
+        scores1 = torch.einsum("bxyhd,bxahd->bxayh", q, k) / math.sqrt(self.d_k)
+        scores2 = torch.einsum("bxyhd,byahd->bxayh", q, k) / math.sqrt(self.d_k)
+        # scores3 = torch.einsum("bxyhd,baxhd->bxayh", q, k) / math.sqrt(self.d_k)
+        # scores4 = torch.einsum("bxyhd,bayhd->bxayh", q, k) / math.sqrt(self.d_k)
         if mask is not None:
-            scores = scores + mask.unsqueeze(4)
+            # scores = scores + mask.unsqueeze(4)
+            scores1 = scores1 + mask.unsqueeze(4)
+            scores2 = scores2 + mask.unsqueeze(4)
+            # scores3 = scores3 + mask.unsqueeze(4)
+            # scores4 = scores4 + mask.unsqueeze(4)
+        scores = torch.cat((scores1, scores2), dim=2)
         att = nn.functional.softmax(scores, dim=2)
         att = self.dropout1(att)
+        att = att.view(num_batches, num_nodes, 2, num_nodes, num_nodes, self.num_heads)
 
-        val = torch.einsum("bxahd,bayhd->bxayhd", left_v, right_v)
-        x = torch.einsum("bxayh,bxayhd->bxyhd", att, val).view(num_batches, num_nodes, num_nodes, self.d_model)
+        # x = torch.einsum("bxayh,bxahd->bxyhd", att, v).contiguous().view(num_batches, num_nodes, num_nodes, self.d_model)
+        x = torch.einsum("bxayh,bxahd->bxyhd", att[:, :, 0, :, :, :], v).contiguous().view(num_batches, num_nodes, num_nodes, self.d_model)
+        x = x + torch.einsum("bxayh,byahd->bxyhd", att[:, :, 1, :, :, :], v).contiguous().view_as(x)
+        # x = x + torch.einsum("bxayh,baxhd->bxyhd", att[:, :, 2, :, :, :], v).contiguous().view_as(x)
+        # x = x + torch.einsum("bxayh,bayhd->bxyhd", att[:, :, 3, :, :, :], v).contiguous().view_as(x)
         x = self.norm1(self.dropout2(self.w_o(x)) + state)
         x = self.norm2(self.dropout3(self.linear2((self.act(self.linear1(x))))) + x)
         return x.permute(0, 3, 1, 2)
@@ -204,37 +217,32 @@ class CustomRobertaSelfAttention(nn.Module):
     def __init__(self, config, rank=64, cpd=False, softmax_head=False, edge_attn=False):
         super().__init__()
 
-        self.num_attention_heads = config.num_attention_heads                             # n_heads
-        self.rank = rank if cpd else int(config.hidden_size / config.num_attention_heads) # n_embed
-        self.hidden_size = config.hidden_size                                             # n_model
+        attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.num_attention_heads = config.num_attention_heads   # n_heads
+        self.rank = rank if cpd else attention_head_size        # n_embed
+        self.hidden_size = config.hidden_size                   # n_model
         self.cpd = cpd
         self.softmax_head = softmax_head
         self.edge_attn = EdgeAttention(rank) if edge_attn else None
-        self.max_position_embeddings = 16
-        self.distance_embedding = nn.Embedding(2 * self.max_position_embeddings + 1, self.rank)
+        # self.max_position_embeddings = 16
+        # self.distance_embedding = nn.Embedding(2 * self.max_position_embeddings + 1, self.rank)
 
         if self.cpd:
             self.wqk1 = nn.Parameter(torch.Tensor(self.num_attention_heads, self.rank))
             self.wqk2 = nn.Parameter(torch.Tensor(self.hidden_size, self.rank))
             self.wqk3 = nn.Parameter(torch.Tensor(self.hidden_size, self.rank))
-            self.wvo1 = nn.Parameter(torch.Tensor(self.num_attention_heads, self.rank))
-            self.wvo2 = nn.Parameter(torch.Tensor(self.hidden_size, self.rank))
-            self.wvo3 = nn.Parameter(torch.Tensor(self.hidden_size, self.rank))
             nn.init.xavier_normal_(self.wqk1)
             nn.init.xavier_normal_(self.wqk2)
             nn.init.xavier_normal_(self.wqk3)
-            nn.init.xavier_normal_(self.wvo1)
-            nn.init.xavier_normal_(self.wvo2)
-            nn.init.xavier_normal_(self.wvo3)
         else:
             self.wq = nn.Parameter(torch.Tensor(self.num_attention_heads, self.hidden_size, self.rank))
             self.wk = nn.Parameter(torch.Tensor(self.num_attention_heads, self.hidden_size, self.rank))
-            self.wv = nn.Parameter(torch.Tensor(self.num_attention_heads, self.hidden_size, self.rank))
-            self.wo = nn.Parameter(torch.Tensor(self.num_attention_heads, self.rank, self.hidden_size))
             nn.init.xavier_normal_(self.wq)
             nn.init.xavier_normal_(self.wk)
-            nn.init.xavier_normal_(self.wv)
-            nn.init.xavier_normal_(self.wo)
+        self.wv = nn.Parameter(torch.Tensor(self.num_attention_heads, self.hidden_size, attention_head_size))
+        self.wo = nn.Parameter(torch.Tensor(self.num_attention_heads, attention_head_size, self.hidden_size))
+        nn.init.xavier_normal_(self.wv)
+        nn.init.xavier_normal_(self.wo)
 
         self.attn_dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -256,17 +264,16 @@ class CustomRobertaSelfAttention(nn.Module):
         else:
             q = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wq]) # [batch_size, n_heads, seq_len, n_embed]
             k = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wk]) # [batch_size, n_heads, seq_len, n_embed]
-            v = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wv]) # [batch_size, n_heads, seq_len, n_embed]
             attention_scores = torch.matmul(q, k.transpose(-2, -1))     # [batch_size, n_heads, seq_len, src_len]
 
-        position_ids_l = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(-1, 1)
-        position_ids_r = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(1, -1)
-        distance = torch.clamp(position_ids_l - position_ids_r, -self.max_position_embeddings, self.max_position_embeddings)
-        positional_embedding = self.distance_embedding(distance + self.max_position_embeddings)
-        positional_embedding = positional_embedding.to(dtype=hidden_states.dtype).permute(2, 0, 1)
-        if not self.cpd:
-            positional_embedding = torch.einsum("bnih,hij->bnij", q, positional_embedding)
-        attention_scores = attention_scores + positional_embedding
+        # position_ids_l = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(-1, 1)
+        # position_ids_r = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).view(1, -1)
+        # distance = torch.clamp(position_ids_l - position_ids_r, -self.max_position_embeddings, self.max_position_embeddings)
+        # positional_embedding = self.distance_embedding(distance + self.max_position_embeddings)
+        # positional_embedding = positional_embedding.to(dtype=hidden_states.dtype).permute(2, 0, 1)
+        # if not self.cpd:
+        #     positional_embedding = torch.einsum("bnih,hij->bnij", q, positional_embedding)
+        # attention_scores = attention_scores + positional_embedding
 
         if self.edge_attn is not None:
             attention_scores = self.edge_attn(attention_scores, edge_attention_mask, prev)
@@ -292,13 +299,9 @@ class CustomRobertaSelfAttention(nn.Module):
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.attn_dropout(attention_probs)
 
-        if self.cpd:
-            context_layer = oe.contract('bnij,bjm,nr,mr,or->bio',
-                                        *[attention_probs, hidden_states, self.wvo1, self.wvo2, self.wvo3],
-                                        optimize='optimal', backend='torch')
-        else:
-            context_layer = torch.matmul(attention_probs, v)                  # [batch_size, n_heads, seq_len, n_embed]
-            context_layer = torch.matmul(context_layer, self.wo).sum(dim = 1) # [batch_size, seq_len, n_model]
+        v = torch.einsum('blm,nmh->bnlh', [hidden_states, self.wv])       # [batch_size, n_heads, seq_len, n_embed]
+        context_layer = torch.matmul(attention_probs, v)                  # [batch_size, n_heads, seq_len, n_embed]
+        context_layer = torch.matmul(context_layer, self.wo).sum(dim = 1) # [batch_size, seq_len, n_model]
         context_layer = self.dropout(context_layer)
         context_layer = self.LayerNorm(context_layer + hidden_states)
 
@@ -880,15 +883,19 @@ class RobertaModel(RobertaPreTrainedModel):
     """
 
     # Copied from transformers.models.bert.modeling_bert.BertModel.__init__ with Bert->Roberta
-    def __init__(self, config, custom=False, rank=64, cpd=False, softmax_head=False, edge_attn=False, add_pooling_layer=False, concate=False):
+    def __init__(self, config, custom=False, rank=64, cpd=False, softmax_head=False, edge_attn=False, edge_tsfm=False, add_pooling_layer=False, concate=False):
         super().__init__(config)
         self.config = config
 
         self.concate = concate
         self.edge_attn = edge_attn
+        self.edge_tsfm = edge_tsfm
         if concate == False:
             self.embeddings = RobertaEmbeddings(config)
-        self.encoder = RobertaEncoder(config, custom, rank, cpd, softmax_head, edge_attn)
+        if edge_tsfm:
+            self.encoder = EdgeTransformerEncoder(config.num_hidden_layers, config.hidden_size)
+        else:
+            self.encoder = RobertaEncoder(config, custom, rank, cpd, softmax_head, edge_attn)
 
         self.pooler = RobertaPooler(config) if add_pooling_layer else None
 
@@ -1033,19 +1040,22 @@ class RobertaModel(RobertaPreTrainedModel):
             # edge_attention_mask: bxa
             edge_attention_mask = edge_attention_mask.unsqueeze(3) + attention_mask.unsqueeze(1).unsqueeze(2)
             # edge_attention_mask: bxay
-        encoder_outputs = self.encoder(
-            embedding_output,
-            attention_mask=extended_attention_mask,
-            edge_attention_mask=edge_attention_mask,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_extended_attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        if self.edge_tsfm:
+            encoder_outputs = self.encoder(embedding_output, attention_mask)
+        else:
+            encoder_outputs = self.encoder(
+                embedding_output,
+                attention_mask=extended_attention_mask,
+                edge_attention_mask=edge_attention_mask,
+                head_mask=head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_extended_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 

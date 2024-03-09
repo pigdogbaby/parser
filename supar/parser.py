@@ -133,8 +133,8 @@ class Parser(object):
         logger.info('\n' + str(args))
         if args.encoder == 'bert':
             num_parameters = self.model.encoder.model.num_parameters()
-            if args.concate:
-                num_parameters += self.model.encoder.encoder.num_parameters()
+            if args.concate and not args.edge_tsfm:
+                num_parameters += self.model.concate.model.num_parameters()
             logger.info("Number of parameters:" + str(num_parameters))
 
         self.transform.train()

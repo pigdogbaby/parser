@@ -57,35 +57,31 @@ class TransformerEmbedding(nn.Module):
         cpd: bool = False,
         softmax_head: bool = False,
         edge_attn: bool = False,
+        edge_tsfm: bool = False,
         concate: bool = False
     ) -> TransformerEmbedding:
         super().__init__()
 
         from transformers import AutoConfig
         if concate:
-            try:
-                self.model = RobertaModel.from_pretrained(name, local_files_only=True)
-            except Exception:
-                self.model = RobertaModel.from_pretrained(name, local_files_only=False)
-            self.model = self.model.requires_grad_(finetune)
             config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
-            self.encoder = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, concate=True)
+            self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, edge_tsfm=edge_tsfm, concate=True)
         else:
-            if finetune:
-                try:
-                    self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, output_attentions=relation, local_files_only=True)
-                except Exception:
-                    self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, output_attentions=relation, local_files_only=False)
-            else:
-                config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
-                self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn)
-            self.model = self.model.requires_grad_(True)
+            # try:
+            #     self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, local_files_only=True)
+            # except Exception:
+            #     self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, local_files_only=False)
+            # self.model = self.model.requires_grad_(finetune)
+
+            config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
+            # self.model = RobertaModel(config)
+            self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, edge_tsfm=edge_tsfm)
         self.tokenizer = TransformerTokenizer('roberta-base')
 
         self.name = name
         self.n_layers = n_layers or self.model.config.num_hidden_layers
-        self.hidden_size = self.encoder.config.hidden_size if concate else self.model.config.hidden_size
-        self.rank = rank if cpd else self.encoder.config.num_attention_heads if concate else self.model.config.num_attention_heads
+        self.hidden_size = self.model.config.hidden_size
+        self.rank = rank if cpd or edge_tsfm else self.model.config.num_attention_heads
         self.n_out = n_out or self.hidden_size
         self.pooling = pooling
         self.pad_index = pad_index
@@ -95,7 +91,7 @@ class TransformerEmbedding(nn.Module):
         self.stride = min(stride, self.max_len)
 
         self.scalar_mix = ScalarMix(self.n_layers, mix_dropout)
-        self.relation = relation
+        self.relation = relation or edge_tsfm
         self.cpd = cpd
         self.softmax_head = softmax_head
         self.concate = concate
@@ -114,7 +110,7 @@ class TransformerEmbedding(nn.Module):
             s += f", finetune={self.finetune}"
         return f"{self.__class__.__name__}({s})"
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, word_mask: torch.FloatTensor = None) -> torch.Tensor:
         r"""
         Args:
             tokens (~torch.Tensor): ``[batch_size, seq_len, fix_len]``.
@@ -123,6 +119,10 @@ class TransformerEmbedding(nn.Module):
             ~torch.Tensor:
                 Contextualized token embeddings of shape ``[batch_size, seq_len, n_out]``.
         """
+
+        if word_mask is not None:
+            x = self.model(tokens, attention_mask=word_mask)
+            return x.attentions[-1].permute(0, 2, 3, 1) if self.relation else x.last_hidden_state
 
         # print(tokens.shape)
         # torch.Size([35, 15, 4])
@@ -141,7 +141,8 @@ class TransformerEmbedding(nn.Module):
         # [  30,    1,    1,    1],
         # [1112,    1,    1,    1],
         # [1858,    1,    1,    1],
-        # [ 479,    1,    1,    1],        # [   1,    1,    1,    1]], device='cuda:0')
+        # [ 479,    1,    1,    1],
+        # [   1,    1,    1,    1]], device='cuda:0')
         mask = tokens.ne(self.pad_index)
         lens = mask.sum((1, 2))
         # [batch_size, n_tokens]
@@ -175,8 +176,6 @@ class TransformerEmbedding(nn.Module):
         #     for i in x.attentions:
         #         print(i.shape)
         #         torch.Size([35, 16, 22, 22])
-        if self.concate:
-            x = self.encoder(x.last_hidden_state, attention_mask=token_mask[:, :self.max_len].float())
 
         # [batch_size, seq_len]
         lens = mask.sum(-1)

@@ -7,7 +7,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from supar.config import Config
 from supar.modules import (CharLSTM, ELMoEmbedding, IndependentDropout,
                            SharedDropout, TransformerEmbedding,
-                           TransformerWordEmbedding, VariationalLSTM)
+                           TransformerWordEmbedding, VariationalLSTM, EdgeTransformerEncoder)
 from supar.modules.transformer import (TransformerEncoder,
                                        TransformerEncoderLayer)
 
@@ -113,20 +113,44 @@ class Model(nn.Module):
                                               scale=self.args.scale)
             self.encoder_dropout = nn.Dropout(p=self.args.encoder_dropout)
         elif encoder == 'bert':
+            # self.encoder = TransformerEmbedding(name='roberta-base',
+            #                                     n_layers=self.args.n_bert_layers,
+            #                                     pooling=self.args.bert_pooling,
+            #                                     pad_index=self.args.pad_index,
+            #                                     mix_dropout=self.args.mix_dropout,
+            #                                     finetune=self.args.finetune)
             self.encoder = TransformerEmbedding(name=self.args.bert,
                                                 n_layers=self.args.n_bert_layers,
                                                 pooling=self.args.bert_pooling,
                                                 pad_index=self.args.pad_index,
                                                 mix_dropout=self.args.mix_dropout,
                                                 rank=self.args.rank,
-                                                finetune=self.args.finetune,
                                                 relation=self.args.relation,
                                                 cpd=self.args.cpd,
                                                 softmax_head=self.args.softmax_head,
                                                 edge_attn=self.args.edge_attn,
-                                                concate=self.args.concate)
+                                                edge_tsfm=self.args.edge_tsfm)
             self.encoder_dropout = nn.Dropout(p=self.args.encoder_dropout)
             self.args.n_encoder_hidden = self.encoder.n_out
+        self.concate = None
+        if self.args.concate:
+            if self.args.edge_tsfm:
+                self.concate = EdgeTransformerEncoder(num_layers=3,
+                                                      input_size=768)
+            else:
+                self.concate = TransformerEmbedding(name='roberta-mine',
+                                                    n_layers=2,
+                                                    pooling=self.args.bert_pooling,
+                                                    pad_index=self.args.pad_index,
+                                                    mix_dropout=self.args.mix_dropout,
+                                                    rank=self.args.rank,
+                                                    finetune=False,
+                                                    relation=self.args.relation,
+                                                    cpd=self.args.cpd,
+                                                    softmax_head=self.args.softmax_head,
+                                                    edge_attn=self.args.edge_attn,
+                                                    concate=True)
+            self.concate_dropout = nn.Dropout(p=self.args.encoder_dropout)
 
     def load_pretrained(self, embed=None):
         if embed is not None:
@@ -190,7 +214,10 @@ class Model(nn.Module):
             x = self.encoder(self.embed(words, feats), words.ne(self.args.pad_index))
         else:
             x = self.encoder(words)
-        return self.encoder_dropout(x)
+        x = self.encoder_dropout(x)
+        if not self.concate:
+            return x
+        return self.concate_dropout(self.concate(x, words.ne(self.args.pad_index).float()[:, :, 0]))
 
     def decode(self):
         raise NotImplementedError

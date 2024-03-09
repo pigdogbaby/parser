@@ -8,6 +8,7 @@ from .mlp import MLP
 from .pretrained import ELMoEmbedding, TransformerEmbedding
 from .transformer import (TransformerDecoder, TransformerEncoder,
                           TransformerWordEmbedding)
+from .edge_tsfm import EdgeTransformerEncoder
 
 __all__ = [
     'Biaffine',
