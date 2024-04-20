@@ -182,7 +182,7 @@ class Parser(object):
         args.steps = len(loader) * epochs // args.update_steps
         args.save(f"{args.path}.yaml")
 
-        self.optimizer = self.init_optimizer()
+        self.optimizer = self.init_optimizer(concate=self.args.concate)
         self.scheduler = self.init_scheduler()
         self.scaler = GradScaler(enabled=args.amp)
 
@@ -499,7 +499,7 @@ class Parser(object):
     def pred_step(self, batch: Batch) -> Batch:
         ...
 
-    def init_optimizer(self) -> Optimizer:
+    def init_optimizer(self, concate=False) -> Optimizer:
         if self.args.encoder in ('lstm', 'transformer'):
             optimizer = Adam(params=self.model.parameters(),
                              lr=self.args.lr,
@@ -507,12 +507,20 @@ class Parser(object):
                              eps=self.args.get('eps', 1e-8),
                              weight_decay=self.args.get('weight_decay', 0))
         else:
-            optimizer = AdamW(params=[{'params': p, 'lr': self.args.lr * (1 if n.startswith('encoder') else self.args.lr_rate)}
-                                      for n, p in self.model.named_parameters()],
-                              lr=self.args.lr,
-                              betas=(self.args.get('mu', 0.9), self.args.get('nu', 0.999)),
-                              eps=self.args.get('eps', 1e-8),
-                              weight_decay=self.args.get('weight_decay', 0))
+            if concate:
+                optimizer = AdamW(params=[{'params': p, 'lr': 5e-5 if n.startswith('encoder.model') else self.args.lr}
+                                        for n, p in self.model.named_parameters()],
+                                lr=self.args.lr,
+                                betas=(self.args.get('mu', 0.9), self.args.get('nu', 0.999)),
+                                eps=self.args.get('eps', 1e-8),
+                                weight_decay=self.args.get('weight_decay', 0))
+            else:
+                optimizer = AdamW(params=[{'params': p, 'lr': self.args.lr * (1 if n.startswith('encoder') else self.args.lr_rate)}
+                                        for n, p in self.model.named_parameters()],
+                                lr=self.args.lr,
+                                betas=(self.args.get('mu', 0.9), self.args.get('nu', 0.999)),
+                                eps=self.args.get('eps', 1e-8),
+                                weight_decay=self.args.get('weight_decay', 0))
         return optimizer
 
     def init_scheduler(self) -> _LRScheduler:

@@ -57,6 +57,7 @@ class TransformerEmbedding(nn.Module):
         cpd: bool = False,
         softmax_head: bool = False,
         edge_attn: bool = False,
+        edge_gnn: bool = False,
         edge_tsfm: bool = False,
         concate: bool = False
     ) -> TransformerEmbedding:
@@ -64,18 +65,17 @@ class TransformerEmbedding(nn.Module):
 
         from transformers import AutoConfig
         if concate:
-            config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
-            self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, edge_tsfm=edge_tsfm, concate=True)
+            config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=cpd)
+            self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, edge_gnn=edge_gnn, edge_tsfm=edge_tsfm, concate=True)
         else:
-            # try:
-            #     self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, local_files_only=True)
-            # except Exception:
-            #     self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, local_files_only=False)
-            # self.model = self.model.requires_grad_(finetune)
-
-            config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=relation)
-            # self.model = RobertaModel(config)
-            self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, edge_tsfm=edge_tsfm)
+            if finetune:
+                try:
+                    self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, local_files_only=True)
+                except Exception:
+                    self.model = RobertaModel.from_pretrained(name, output_hidden_states=True, local_files_only=False)
+            else:
+                config = AutoConfig.from_pretrained(f"{name}.json", output_hidden_states=True, output_attentions=True)
+                self.model = RobertaModel(config, custom=True, rank=rank, cpd=cpd, softmax_head=softmax_head, edge_attn=edge_attn, edge_gnn=edge_gnn, edge_tsfm=edge_tsfm)
         self.tokenizer = TransformerTokenizer('roberta-base')
 
         self.name = name
@@ -181,7 +181,7 @@ class TransformerEmbedding(nn.Module):
         lens = mask.sum(-1)
         # the length of each token, padding token is 0, now replace 0 with 1 to avoid divide 0 exception
         lens = lens.masked_fill_(lens.eq(0), 1)
-        if self.relation:
+        if self.relation and not self.finetune:
             x = x.attentions
             # [batch_size, max_len, max_len, rank]
             x = self.scalar_mix(x[-self.n_layers:]).permute(0, 2, 3, 1)

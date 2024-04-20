@@ -125,10 +125,12 @@ class Model(nn.Module):
                                                 pad_index=self.args.pad_index,
                                                 mix_dropout=self.args.mix_dropout,
                                                 rank=self.args.rank,
+                                                finetune=self.args.concate,
                                                 relation=self.args.relation,
                                                 cpd=self.args.cpd,
                                                 softmax_head=self.args.softmax_head,
                                                 edge_attn=self.args.edge_attn,
+                                                edge_gnn=self.args.edge_gnn,
                                                 edge_tsfm=self.args.edge_tsfm)
             self.encoder_dropout = nn.Dropout(p=self.args.encoder_dropout)
             self.args.n_encoder_hidden = self.encoder.n_out
@@ -149,6 +151,7 @@ class Model(nn.Module):
                                                     cpd=self.args.cpd,
                                                     softmax_head=self.args.softmax_head,
                                                     edge_attn=self.args.edge_attn,
+                                                    edge_gnn=self.args.edge_gnn,
                                                     concate=True)
             self.concate_dropout = nn.Dropout(p=self.args.encoder_dropout)
 
